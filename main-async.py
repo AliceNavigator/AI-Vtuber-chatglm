@@ -17,6 +17,7 @@ print("=====================================================================\n")
 
 tokenizer = AutoTokenizer.from_pretrained("./chatglm-6b-int4-qe", trust_remote_code=True)  # 导入chatglm
 model = AutoModel.from_pretrained("./chatglm-6b-int4-qe", trust_remote_code=True).half().cuda()
+#  model = model.eval()  # 如果需要模型继续训练请注释掉这一行
 
 QuestionList = queue.Queue(10)  # 定义问题 用户名 回复 播放列表 四个先进先出队列
 QuestionName = queue.Queue(10)
@@ -48,14 +49,15 @@ async def on_danmaku(event):
     global LogsList
     content = event["data"]["info"][1]  # 获取弹幕内容
     user_name = event["data"]["info"][2][1]  # 获取用户昵称
-    print(f"[{user_name}]: {content}")  # 打印弹幕信息
+    print(f"\033[36m[{user_name}]\033[0m:{content}")  # 打印弹幕信息
     if not QuestionList.full():
         QuestionName.put(user_name)  # 将用户名放入队列
         QuestionList.put(content)  # 将弹幕消息放入队列
         time1 = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         LogsList.put(f"[{time1}] [{user_name}]：{content}")
+        print('\033[32mSystem>>\033[0m已将该条弹幕添加入问题队列')
     else:
-        print('队列已满，该条弹幕被丢弃')
+        print('\033[32mSystem>>\033[0m队列已满，该条弹幕被丢弃')
 
 
 def ai_response():
@@ -72,8 +74,10 @@ def ai_response():
     user_name = QuestionName.get()
     ques = LogsList.get()
     response, history = model.chat(tokenizer, prompt, history=[])  # 生成观众提问
-    answer = f'回复{user_name}，{response}'
+    answer = f'回复{user_name}：{response}'
     AnswerList.put(answer)
+    current_question_count = QuestionList.qsize()
+    print(f'\033[32mSystem>>\033[0m[{user_name}]的回复已存入队列，当前剩余问题数:{current_question_count}')
     time2 = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with open("./logs.txt", "a", encoding="utf-8") as f:  # 将问答写入logs
         f.write(f"{ques}\n[{time2}] {answer}\n========================================================\n")
@@ -116,10 +120,14 @@ def tts_generate():
     global MpvList
     global AudioCount
     response = AnswerList.get()
-    print(f"{response}")  # 打印AI回复信息
-    with open("./output.txt", "w", encoding="utf-8") as f:
+    print(f"\033[31m[ChatGLM]\033[0m{response}")  # 打印AI回复信息
+    with open("./output/output.txt", "w", encoding="utf-8") as f:
         f.write(f"{response}")  # 将要读的回复写入临时文件
-    subprocess.run(f'.\env\Scripts\edge-tts.exe --voice zh-CN-XiaoyiNeural --f output.txt --write-media output{AudioCount}.mp3', shell=True)  # 执行命令行指令
+    subprocess.run(f'.\env\Scripts\edge-tts.exe --voice zh-CN-XiaoyiNeural --f .\output\output.txt --write-media .\output\output{AudioCount}.mp3 2>nul', shell=True)  # 执行命令行指令
+    begin_name = response.find('回复')
+    end_name = response.find("：")
+    name = response[begin_name+2:end_name]
+    print(f'\033[32mSystem>>\033[0m对[{name}]的回复已成功转换为语音并缓存为output{AudioCount}.mp3')
     MpvList.put(AudioCount)
     AudioCount += 1
     is_tts_ready = True  # 指示TTS已经准备好回复下一个问题
@@ -147,8 +155,10 @@ def mpv_read():
     global is_mpv_ready
     while not MpvList.empty():
         temp1 = MpvList.get()
-        subprocess.run(f'mpv.exe -vo null output{temp1}.mp3', shell=True)  # 执行命令行指令
-        subprocess.run(f'del /f .\output{temp1}.mp3', shell=True)
+        current_mpvlist_count = MpvList.qsize()
+        print(f'\033[32mSystem>>\033[0m开始播放output{temp1}.mp3，当前待播语音数：{current_mpvlist_count}')
+        subprocess.run(f'mpv.exe -vo null .\output\output{temp1}.mp3 1>nul', shell=True)  # 执行命令行指令
+        subprocess.run(f'del /f .\output\output{temp1}.mp3 1>nul', shell=True)
     is_mpv_ready = True
 
 
