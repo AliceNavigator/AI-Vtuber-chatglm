@@ -1,3 +1,4 @@
+import argparse
 import datetime
 import queue
 import subprocess
@@ -10,24 +11,78 @@ from transformers import AutoTokenizer, AutoModel
 print("=====================================================================")
 print("让AI帮你回复弹幕，这样你就可以快乐玩游戏了！")
 print("我重写了整个代码，现在她可以异步处理弹幕了，这将大幅降低回复延迟")
-print("喜欢的话给个三连吧！")
+print("现在也支持扮演和会话记忆设置，喜欢的话给个三连吧！")
 print("ChatGLM-6B：                https://github.com/THUDM/ChatGLM-6B")
 print("注意你需要至少6G以上的N卡，另外，我没有也不打算弄粉丝群 by 领航员未鸟")
 print("=====================================================================\n")
-
-tokenizer = AutoTokenizer.from_pretrained("./chatglm-6b-int4-qe", trust_remote_code=True)  # 导入chatglm
-model = AutoModel.from_pretrained("./chatglm-6b-int4-qe", trust_remote_code=True).half().cuda()
-#  model = model.eval()  # 如果需要模型继续训练请注释掉这一行
 
 QuestionList = queue.Queue(10)  # 定义问题 用户名 回复 播放列表 四个先进先出队列
 QuestionName = queue.Queue(10)
 AnswerList = queue.Queue()
 MpvList = queue.Queue()
 LogsList = queue.Queue()
+history = []
 is_ai_ready = True  # 定义chatglm是否转换完成标志
 is_tts_ready = True  # 定义语音是否生成完成标志
 is_mpv_ready = True  # 定义是否播放完成标志
 AudioCount = 0
+enable_history = False  # 是否启用记忆
+history_count = 4  # 定义最大对话记忆轮数,请注意这个数值不包括扮演设置消耗的轮数，只有当enable_history为True时生效
+enable_role = True  # 是否启用扮演模式
+
+
+def initialize():
+    """
+    初始化设定
+    :return:
+    """
+    global enable_history
+    global history_count
+    global enable_role
+    parser = argparse.ArgumentParser(description='AI-Vtuber-ChatGLM')
+    parser.add_argument('-m', '--memory', help='启用会话记忆', action='store_true')  # 默认为False
+    parser.add_argument('-c', '--count', type=int, help='设定记忆轮数，只在启用会话记忆后有效，不指定默认为4', default='4')
+    parser.add_argument('-r', '--role', help='启用扮演模式', action='store_true')
+    args = parser.parse_args()
+    enable_history = args.memory
+    enable_role = args.role
+    history_count = args.count
+    print(f'\n扮演模式启动状态为：{enable_role}')
+    if enable_history:
+        print(f'会话记忆启动状态为：{enable_history}')
+        print(f'会话记忆轮数为：{history_count}\n')
+    else:
+        print(f'会话记忆启动状态为：{enable_history}\n')
+
+
+def role_set():
+    """
+    读取扮演设置
+    :return:
+    """
+    global history
+    print("\n开始初始化扮演设定")
+    print("请注意：此时会读取并写入Role_setting.txt里的设定，行数越多占用的对话轮数就越多，请根据配置酌情设定\n")
+    with open("Role_setting.txt", "r", encoding="utf-8") as f:
+        role_setting = f.readlines()
+    for setting in role_setting:
+        role_response, history = model.chat(tokenizer, setting.strip(), history=history)
+        print(f'\033[32m[设定]\033[0m：{setting.strip()}')
+        print(f'\033[31m[回复]\033[0m：{role_response}\n')
+    return history
+
+
+initialize()
+print("=====================================================================\n")
+print(f'开始导入ChatGLM模型\n')
+tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm-6b-int4-qe", cache_dir="./", trust_remote_code=True)  # 导入chatglm 你可以换你喜欢的版本模型
+model = AutoModel.from_pretrained("THUDM/chatglm-6b-int4-qe", cache_dir="./", trust_remote_code=True).half().cuda()
+model = model.eval()
+if enable_role:
+    print("\n=====================================================================")
+    Role_history = role_set()
+else:
+    Role_history = []
 
 print("--------------------")
 print("启动成功！")
@@ -70,13 +125,27 @@ def ai_response():
     global AnswerList
     global QuestionName
     global LogsList
+    global history
     prompt = QuestionList.get()
     user_name = QuestionName.get()
     ques = LogsList.get()
-    response, history = model.chat(tokenizer, prompt, history=[])  # 生成观众提问
+    if len(history) >= len(Role_history)+history_count and enable_history:  # 如果启用记忆且达到最大记忆长度
+        history = Role_history + history[-history_count:]
+        response, history = model.chat(tokenizer, prompt, history=history)
+    elif enable_role and not enable_history:                                # 如果没有启用记忆且启用扮演
+        history = Role_history
+        response, history = model.chat(tokenizer, prompt, history=history)
+    elif enable_history:                                                    # 如果启用记忆
+        response, history = model.chat(tokenizer, prompt, history=history)
+    elif not enable_history:                                                # 如果没有启用记忆
+        response, history = model.chat(tokenizer, prompt, history=[])
+    else:
+        response = ['Error：记忆和扮演配置错误！请检查相关设置']
+        print(response)
     answer = f'回复{user_name}：{response}'
     AnswerList.put(answer)
     current_question_count = QuestionList.qsize()
+    print(f"\033[31m[ChatGLM]\033[0m{answer}")  # 打印AI回复信息
     print(f'\033[32mSystem>>\033[0m[{user_name}]的回复已存入队列，当前剩余问题数:{current_question_count}')
     time2 = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with open("./logs.txt", "a", encoding="utf-8") as f:  # 将问答写入logs
@@ -120,10 +189,9 @@ def tts_generate():
     global MpvList
     global AudioCount
     response = AnswerList.get()
-    print(f"\033[31m[ChatGLM]\033[0m{response}")  # 打印AI回复信息
     with open("./output/output.txt", "w", encoding="utf-8") as f:
         f.write(f"{response}")  # 将要读的回复写入临时文件
-    subprocess.run(f'.\env\Scripts\edge-tts.exe --voice zh-CN-XiaoyiNeural --f .\output\output.txt --write-media .\output\output{AudioCount}.mp3 2>nul', shell=True)  # 执行命令行指令
+    subprocess.run(f'edge-tts.exe --voice zh-CN-XiaoyiNeural --f .\output\output.txt --write-media .\output\output{AudioCount}.mp3 2>nul', shell=True)  # 执行命令行指令
     begin_name = response.find('回复')
     end_name = response.find("：")
     name = response[begin_name+2:end_name]
